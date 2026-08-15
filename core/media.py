@@ -1,4 +1,5 @@
-"""Media type detection and audio extraction via ffmpeg."""
+"""Media type detection, duration probing, and audio extraction via ffmpeg."""
+import re
 import shutil
 import subprocess
 from functools import lru_cache
@@ -7,6 +8,8 @@ from pathlib import Path
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".mpeg", ".mpg", ".3gp"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".opus", ".aiff"}
 SUBTITLE_EXTS = {".srt"}
+
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
 @lru_cache(maxsize=1)
@@ -40,6 +43,16 @@ def is_audio(path):
 
 def is_subtitle(path):
     return _ext(path) in SUBTITLE_EXTS
+
+
+def media_duration(path):
+    """Container duration in seconds, parsed from `ffmpeg -i` output."""
+    proc = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+                          capture_output=True, text=True)
+    m = _DURATION_RE.search(proc.stderr or "")
+    if not m:
+        raise RuntimeError(f"Could not determine the duration of {Path(path).name}.")
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
 
 
 def extract_audio(input_path, output_path, fmt="wav", log=print):
@@ -77,3 +90,14 @@ def extract_for_asr(input_path, work_dir):
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg could not decode the input:\n{proc.stderr[-1500:]}")
     return out
+
+
+def normalize_wav(input_path, output_path, sample_rate=24000):
+    """Convert any audio clip to mono PCM s16le WAV at the given sample rate."""
+    cmd = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+           "-i", str(input_path), "-ac", "1", "-ar", str(sample_rate),
+           "-acodec", "pcm_s16le", str(output_path)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg could not convert audio:\n{proc.stderr[-1500:]}")
+    return Path(output_path)

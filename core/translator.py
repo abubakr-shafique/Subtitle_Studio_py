@@ -1,4 +1,10 @@
-"""Subtitle translation: Google Translate (online) or NLLB-200 (offline, local)."""
+"""Subtitle translation: Google Translate (online) or NLLB-200 (offline, local).
+
+Failsafe policy: every batch is tried once, retried once after a short pause,
+and - if it still fails - skipped, keeping the original text for those cues
+while the remaining batches continue. A summary is logged at the end.
+"""
+import time
 from pathlib import Path
 
 from .languages import google_code, nllb_code, nllb_for_whisper
@@ -9,6 +15,7 @@ ENGINE_LABELS = {
     "nllb": "NLLB-200 (offline, local model)",
 }
 BATCH_SIZE = 32
+RETRY_DELAY_S = 1.5
 
 
 def resolve_codes(engine_key, source_whisper, target_name):
@@ -53,7 +60,17 @@ class GoogleEngine:
             return [t or "" for t in translator.translate_batch(list(texts))]
         except Exception as exc:
             self.log(f"Batch request failed ({exc}); retrying line by line...")
-            return [(translator.translate(t) or "") for t in texts]
+            out, failures, last_exc = [], 0, None
+            for t in texts:
+                try:
+                    out.append(translator.translate(t) or "")
+                except Exception as line_exc:  # keep the original text for this line
+                    failures += 1
+                    last_exc = line_exc
+                    out.append(t)
+            if failures == len(texts) and texts:
+                raise last_exc  # nothing got through - let the caller's failsafe handle it
+            return out
 
 
 class NLLBEngine:
@@ -91,15 +108,35 @@ class NLLBEngine:
         return [r["translation_text"] for r in results]
 
 
+def _translate_with_retry(engine, payload, src_code, tgt_code, batch_no, log):
+    """Try a batch, retry once, then give up (returns None)."""
+    try:
+        return engine.translate(payload, src_code, tgt_code)
+    except Exception as exc:
+        log(f"WARNING: translation batch {batch_no} failed ({exc}); retrying once...")
+        time.sleep(RETRY_DELAY_S)
+        try:
+            return engine.translate(payload, src_code, tgt_code)
+        except Exception as exc2:
+            log(f"WARNING: batch {batch_no} failed again ({exc2}); "
+                f"keeping the original text for those {len(payload)} cue(s).")
+            return None
+
+
 def translate_srt_file(src_path, dst_path, engine, src_code, tgt_code,
                        log=print, cancel=None, progress_cb=None):
-    """Translate every cue of an SRT file, preserving indices and timestamps."""
+    """Translate every cue of an SRT file, preserving indices and timestamps.
+
+    Failsafe: failed batches are skipped (original text kept); empty
+    translations fall back to the original text. The job never aborts
+    mid-file because of a bad batch.
+    """
     subs = parse_srt(Path(src_path).read_text(encoding="utf-8-sig"))
     if not subs:
         raise ValueError(f"No subtitle cues could be parsed from {Path(src_path).name}.")
     texts = [s.text for s in subs]
     total = len(texts)
-    done = 0
+    done = failed = 0
     for start in range(0, total, BATCH_SIZE):
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Cancelled during translation.")
@@ -107,9 +144,18 @@ def translate_srt_file(src_path, dst_path, engine, src_code, tgt_code,
         idxs = [i for i, t in enumerate(chunk) if t.strip()]
         payload = [chunk[i] for i in idxs]
         if payload:
-            translated = engine.translate(payload, src_code, tgt_code)
-            for i, t in zip(idxs, translated):
-                chunk[i] = t.strip()
+            translated = _translate_with_retry(
+                engine, payload, src_code, tgt_code, start // BATCH_SIZE + 1, log
+            )
+            if translated is None:
+                failed += len(payload)  # originals stay in place
+            else:
+                for i, t in zip(idxs, translated):
+                    t = (t or "").strip()
+                    if t:
+                        chunk[i] = t
+                    else:
+                        failed += 1  # empty translation -> keep original
         for i, t in enumerate(chunk):
             subs[start + i] = subs[start + i]._replace(text=t)
         done += len(chunk)
@@ -118,4 +164,6 @@ def translate_srt_file(src_path, dst_path, engine, src_code, tgt_code,
         log(f"Translated {done}/{total} cues")
     dst_path = Path(dst_path)
     dst_path.write_text(compose_srt(subs), encoding="utf-8")
+    if failed:
+        log(f"Translation finished with {failed} cue(s) left in the source language.")
     return dst_path

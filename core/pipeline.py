@@ -1,14 +1,15 @@
-"""End-to-end job orchestration: extract audio -> transcribe -> translate."""
+"""End-to-end job orchestration: extract audio -> transcribe -> translate -> dub."""
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 from .languages import google_code, name_for_whisper, whisper_code
-from .media import extract_audio, extract_for_asr, is_audio, is_video
+from .media import extract_audio, extract_for_asr, is_audio, is_video, media_duration
 from .subtitles import write_srt, write_vtt
 from .transcriber import WhisperTranscriber
 from .translator import ENGINE_LABELS, make_engine, resolve_codes, translate_srt_file
+from .tts import TTS_ENGINE_LABELS, dub_srt, make_tts_engine, trim_wav
 
 
 @dataclass
@@ -22,6 +23,8 @@ class JobConfig:
     source_language: Optional[str] = None   # Whisper code; None = auto-detect
     target_language: str = "English"        # display name from LANGUAGES
     translation_engine: str = "google"      # "google" | "nllb"
+    generate_audio: bool = False            # synthesize the translation into audio
+    tts_engine: str = "edge"                # "edge" | "xtts"
     whisper_model: str = "large-v3"
     device: str = "auto"                    # "auto" | "cuda" | "cpu"
 
@@ -42,19 +45,27 @@ def run_job(cfg, log=print, progress=None, cancel=None):
     stem = inp.stem
     ext = inp.suffix.lower()
     outputs: List[Path] = []
+    tgt_gcode = google_code(cfg.target_language)
 
     if ext == ".srt":
-        # Subtitle-only workflow: translate an existing SRT.
-        if not cfg.translate:
-            raise ValueError("An .srt file was loaded - enable 'Translate subtitles'.")
+        # Subtitle-only workflow: translate (and optionally dub) an existing SRT.
+        if not (cfg.translate or cfg.generate_audio):
+            raise ValueError("An .srt file was loaded - enable 'Translate subtitles' and/or 'Translated audio'.")
+        if cfg.generate_audio and not cfg.translate:
+            raise ValueError("Translated audio requires 'Translate subtitles' to be enabled.")
         srt_path = inp
         src_lang = cfg.source_language
+        duration = None
+        reference_wav = None
         translate_base = 0.05
     else:
         if not (is_video(inp) or is_audio(inp)):
             raise ValueError(f"Unsupported file type: {ext or '(none)'}")
-        if not (cfg.save_audio or cfg.transcribe or cfg.translate):
+        if not (cfg.save_audio or cfg.transcribe or cfg.translate or cfg.generate_audio):
             raise ValueError("Nothing to do - enable at least one task.")
+        if cfg.generate_audio and not cfg.translate:
+            raise ValueError("Translated audio requires 'Translate subtitles' to be enabled.")
+        duration = media_duration(inp)
 
         if cfg.save_audio:
             progress(0.02, "Extracting audio...")
@@ -67,22 +78,31 @@ def run_job(cfg, log=print, progress=None, cancel=None):
 
         srt_path = None
         src_lang = cfg.source_language
-        translate_base = 0.78
+        reference_wav = None
+        need_asr = cfg.transcribe or cfg.translate or cfg.generate_audio
+        translate_base = 0.62 if cfg.generate_audio else 0.78
 
-        if cfg.transcribe or cfg.translate:
+        if need_asr:
             _check_cancel(cancel)
             progress(0.05, f"Loading Whisper model '{cfg.whisper_model}'...")
             log(f"Loading Whisper model '{cfg.whisper_model}' (downloads on first run)...")
             transcriber = WhisperTranscriber(cfg.whisper_model, cfg.device, log=log)
             with tempfile.TemporaryDirectory() as tmp:
                 wav = extract_for_asr(inp, tmp)
+                if cfg.generate_audio and cfg.tts_engine == "xtts":
+                    reference_wav = trim_wav(wav, Path(tmp) / "xtts_reference.wav", 30)
+                    log("Prepared a 30 s voice reference for XTTS cloning.")
                 log("Transcribing...")
                 subs, lang, prob = transcriber.transcribe(
                     wav,
                     language=cfg.source_language,
-                    progress_cb=lambda f: progress(0.05 + 0.70 * f, "Transcribing..."),
+                    progress_cb=lambda f: progress(0.05 + 0.55 * f, "Transcribing..."),
                     cancel=cancel,
                 )
+                if cfg.generate_audio and cfg.tts_engine == "xtts":
+                    ref_out = Path(tempfile.mkdtemp(prefix="subtitle_studio_ref_")) / "xtts_reference.wav"
+                    ref_out.write_bytes(Path(reference_wav).read_bytes())
+                    reference_wav = ref_out
             if not subs:
                 raise RuntimeError("No speech was detected in the input.")
             src_lang = lang
@@ -98,23 +118,38 @@ def run_job(cfg, log=print, progress=None, cancel=None):
             outputs += [srt_path, vtt_path]
             log(f"Saved subtitles: {srt_path.name}, {vtt_path.name}")
 
-    if cfg.translate:
+    translated_path = None
+    if cfg.translate or cfg.generate_audio:
         _check_cancel(cancel)
         if src_lang and src_lang == whisper_code(cfg.target_language):
             log("Note: target language matches the source - output will mirror the input.")
-        dst = out_dir / f"{stem}.{google_code(cfg.target_language)}.srt"
+        translated_path = out_dir / f"{stem}.{tgt_gcode}.srt"
         engine = make_engine(cfg.translation_engine, cfg.device, log=log)
         src_code, tgt_code = resolve_codes(cfg.translation_engine, src_lang, cfg.target_language)
         log(f"Translating to {cfg.target_language} via {ENGINE_LABELS[cfg.translation_engine]}...")
         translate_srt_file(
-            srt_path, dst, engine, src_code, tgt_code,
+            srt_path, translated_path, engine, src_code, tgt_code,
             log=log, cancel=cancel,
             progress_cb=lambda f: progress(
-                translate_base + (1.0 - translate_base) * f, "Translating..."
+                translate_base + (0.92 - translate_base) * f, "Translating..."
             ),
         )
-        outputs.append(dst)
-        log(f"Saved translated subtitles: {dst.name}")
+        outputs.append(translated_path)
+        log(f"Saved translated subtitles: {translated_path.name}")
+
+    if cfg.generate_audio:
+        _check_cancel(cancel)
+        out_wav = out_dir / f"{stem}.{tgt_gcode}.dub.wav"
+        log(f"Generating translated audio via {TTS_ENGINE_LABELS[cfg.tts_engine]}...")
+        tts = make_tts_engine(cfg.tts_engine, cfg.device, log=log, reference_wav=reference_wav)
+        tts.check_language(tgt_gcode)
+        dub_srt(
+            translated_path, out_wav, tts, tgt_gcode, duration,
+            log=log, cancel=cancel,
+            progress_cb=lambda f: progress(0.92 + 0.08 * f, "Synthesizing audio..."),
+        )
+        outputs.append(out_wav)
+        log(f"Saved translated audio: {out_wav.name}")
 
     progress(1.0, "Done")
     return outputs

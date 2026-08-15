@@ -3,6 +3,7 @@ faster-whisper>=1.1.0      # Whisper transcription on CTranslate2 (GPU/CPU)
 customtkinter>=5.2.2       # modern Tkinter GUI
 deep-translator>=1.11.4    # Google Translate engine (online)
 imageio-ffmpeg>=0.5.1      # bundled ffmpeg binary used for audio extraction
+numpy>=1.26                # sample-level audio mixing for the dubbed track
 
 # ---- Optional: offline translation engine (NLLB-200) ----
 # Needed only if you want the "NLLB-200 (offline, local model)" engine.
@@ -10,3 +11,8 @@ imageio-ffmpeg>=0.5.1      # bundled ffmpeg binary used for audio extraction
 # torch>=2.1.0
 # transformers>=4.40.0
 # sentencepiece>=0.2.0
+
+# ---- Optional: translated audio (TTS dubbing) ----
+# Needed only for "Generate translated audio". Pick one or both engines.
+# edge-tts>=6.1.12         # Edge TTS: online neural voices (incl. Urdu)
+# coqui-tts>=0.24          # XTTS v2: offline voice cloning (17 languages, no Urdu)

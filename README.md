@@ -4,9 +4,10 @@ A desktop app (Python + CustomTkinter) that turns a **video or audio file** into
 
 - an extracted **audio track** (WAV or MP3),
 - **subtitles** (`.srt` + `.vtt`) with automatic language detection,
-- and optionally a **translated subtitle file** (timestamps preserved).
+- optionally a **translated subtitle file** (timestamps preserved),
+- and optionally a **translated audio track** (TTS dubbing aligned to the original timeline).
 
-You can also load an existing `.srt` and translate it directly.
+You can also load an existing `.srt` and translate / dub it directly.
 
 ## Features
 
@@ -16,7 +17,11 @@ You can also load an existing `.srt` and translate it directly.
 - Subtitle translation with two engines:
   - **Google Translate (online)** - zero extra downloads, needs internet
   - **NLLB-200 distilled 600M (offline)** - runs locally on your GPU/CPU, private
+- **Translated audio (TTS dubbing)** with two engines:
+  - **Edge TTS (online)** - neural voices for every built-in language, including Urdu and Hindi
+  - **XTTS v2 (offline)** - clones the original speaker's voice from a 30 s reference (17 languages, no Urdu)
 - 24 built-in languages, including English, Turkish, Spanish, Hindi, Urdu, French, Chinese (Simplified/Traditional), Japanese, Korean, Arabic, German, Russian, and more
+- Resilient by design: a failed translation batch is retried once, then skipped (original text kept) while the rest of the file continues; a failed TTS cue is left silent. Nothing aborts mid-file.
 - Background worker thread: the GUI never freezes, and long jobs can be cancelled
 - No separate ffmpeg install needed (uses the `imageio-ffmpeg` bundled binary)
 
@@ -25,11 +30,13 @@ You can also load an existing `.srt` and translate it directly.
 ```
 video/audio file
       |
-      |--(extract audio only)--> name_audio.wav / .mp3
+      |--(extract audio only)----------------> name_audio.wav / .mp3
       |
-      +--> ffmpeg -> 16 kHz mono WAV -> faster-whisper -> name.<lang>.srt + .vtt
+      +--> ffmpeg 16 kHz WAV -> faster-whisper -> name.<lang>.srt + .vtt
                                                               |
                                             (optional) translate -> name.<target>.srt
+                                                              |
+                                            (optional) TTS dub  -> name.<target>.dub.wav
 ```
 
 ## Installation
@@ -44,11 +51,14 @@ conda activate Subtitle_Studio_py      # Windows
 pip install -r requirements.txt
 ```
 
-### Optional: offline translation (NLLB-200)
+### Optional extras
 
-Uncomment the three lines at the bottom of `requirements.txt`, then re-run
-`pip install -r requirements.txt`. The model (~2.4 GB) downloads from Hugging
-Face on first use.
+Uncomment the relevant lines at the bottom of `requirements.txt`, then re-run
+`pip install -r requirements.txt`:
+
+- **NLLB-200** (offline translation): torch + transformers + sentencepiece. ~2.4 GB model download on first use.
+- **Edge TTS** (online translated audio): `edge-tts`. Small, pure Python.
+- **XTTS v2** (offline translated audio with voice cloning): `coqui-tts`. ~1.8 GB model download on first use. Note the model is under the **CPML non-commercial license**.
 
 ### GPU notes (CUDA)
 
@@ -70,16 +80,30 @@ python app.py
    - **Extract audio only** - choose `wav` (lossless) or `mp3`.
    - **Generate subtitles** - pick the Whisper model and device.
    - **Translate subtitles** - pick source (`Auto-detect` uses Whisper's detected language), target language, and engine.
+   - **Generate translated audio** - pick the TTS engine (requires translation to be on; the app offers to enable it for you).
 3. Press **Start**. Watch the progress bar and log; **Cancel** stops between segments/batches.
 4. **Open output folder** jumps straight to the results.
 
-### Output files (for input `lecture.mp4`)
+### Output files (for input `lecture.mp4`, target Turkish)
 
 | File | Content |
 |---|---|
 | `lecture_audio.wav` / `.mp3` | extracted audio track |
 | `lecture.en.srt`, `lecture.en.vtt` | subtitles in the detected language |
-| `lecture.tr.srt` | subtitles translated to the target language (e.g. Turkish) |
+| `lecture.tr.srt` | translated subtitles (timestamps preserved) |
+| `lecture.tr.dub.wav` | translated speech, aligned to the original timeline (24 kHz WAV) |
+
+## How the dubbing syncs
+
+Each translated cue is synthesized and placed at its **original start time** on a
+silent canvas the length of the source media. If a synthesized clip is longer
+than the gap before the next cue, it is faded out (40 ms) and truncated so cues
+never talk over each other; short clips leave natural silence. The result is a
+WAV you can mux back over the video, e.g.:
+
+```bash
+ffmpeg -i lecture.mp4 -i lecture.tr.dub.wav -map 0:v -map 1:a -c:v copy -shortest lecture_tr.mp4
+```
 
 ## Choosing a Whisper model
 
@@ -102,20 +126,36 @@ Models download from Hugging Face on first use (`large-v3` is ~3 GB).
 | Google Translate | required | none | fast, free endpoint; unofficial API, very long jobs may be rate-limited |
 | NLLB-200 (offline) | no | torch + transformers + sentencepiece | private, runs on your GPU; ~2.4 GB model download once |
 
-Translation preserves cue indices and timestamps exactly - only the text changes.
+**Failsafe:** translation runs in batches of 32 cues. A failed batch is retried
+once after a short pause; if it still fails, those cues keep their original text
+and the job continues. The log reports how many cues (if any) were left
+untranslated, so you can re-run just to patch them.
+
+## TTS engines (translated audio)
+
+| Engine | Internet | Extra install | Languages | Notes |
+|---|---|---|---|---|
+| Edge TTS | required | `edge-tts` | all 24 built-in (incl. Urdu, Hindi) | neural voices, one default voice per language - edit `EDGE_VOICES` in `core/tts.py` to change |
+| XTTS v2 | no | `coqui-tts` | 17 (no Urdu) | clones the original speaker from a 30 s reference auto-cut from your file; CPML non-commercial license |
+
+**Failsafe:** a cue that fails to synthesize is left silent and dubbing
+continues; the log reports how many cues were spoken vs skipped.
 
 ## Hardware fit (32 GB RAM / 16 GB VRAM)
 
-`large-v3` in `float16` (~6-8 GB VRAM) plus NLLB-200 in `float16` (~1.5 GB)
-fit comfortably in 16 GB VRAM, and 32 GB system RAM is plenty for long videos.
-If you ever hit OOM, switch the model to `medium` or use CPU + `small`.
+`large-v3` in `float16` (~6-8 GB VRAM), NLLB-200 in `float16` (~1.5 GB), and
+XTTS v2 (~2 GB) each fit comfortably - even two at a time - in 16 GB VRAM, and
+32 GB system RAM is plenty for long videos. If you ever hit OOM, switch the
+Whisper model to `medium` or use CPU + `small`.
 
 ## Troubleshooting
 
 - **"ffmpeg was not found"** - `pip install imageio-ffmpeg` (or install system ffmpeg).
 - **Whisper fails to load on CUDA** - install the CUDA 12 runtime libs (see GPU notes), or set Device to `CPU`.
-- **NLLB engine errors on start** - the optional deps are not installed; see the section above.
-- **Google engine returns errors** - you are offline or rate-limited; wait a minute or switch to NLLB.
+- **NLLB engine errors on start** - the optional deps are not installed; see Optional extras.
+- **Google engine leaves cues untranslated** - you were offline or rate-limited; the failsafe kept the original text. Wait a minute and re-run, or switch to NLLB.
+- **"XTTS v2 does not support ..."** - that target (e.g. Urdu) has no XTTS voice; use Edge TTS for it.
+- **"XTTS voice cloning needs the original media"** - you loaded an `.srt`; voice cloning needs the source audio/video. Use Edge TTS for `.srt` input.
 - **First run is slow** - model weights are downloading; subsequent runs start instantly.
 
 ## Project structure
@@ -125,11 +165,12 @@ subtitle_studio/
 |-- app.py                 # CustomTkinter GUI (run this)
 |-- core/
 |   |-- languages.py       # one registry: Whisper / Google / NLLB codes
-|   |-- media.py           # ffmpeg audio extraction, format detection
+|   |-- media.py           # ffmpeg audio extraction, duration probe, WAV normalize
 |   |-- subtitles.py       # SRT/VTT parse + write (dependency-free)
 |   |-- transcriber.py     # faster-whisper wrapper (progress + cancel)
-|   |-- translator.py      # Google + NLLB engines, SRT translation driver
-|   `-- pipeline.py        # job orchestration (extract -> transcribe -> translate)
+|   |-- translator.py      # Google + NLLB engines, batch failsafe, SRT driver
+|   |-- tts.py             # Edge TTS + XTTS engines, timeline dubbing mixer
+|   `-- pipeline.py        # job orchestration (extract -> transcribe -> translate -> dub)
 |-- requirements.txt
 `-- README.md
 ```
@@ -139,4 +180,7 @@ subtitle_studio/
 - Whisper's built-in `translate` task only translates *into English*, so this app
   uses dedicated translators to support many source/target pairs.
 - Translation is cue-by-cue; very long cues are sent as-is (NLLB truncates at 512 tokens).
-- The Google engine uses an unofficial endpoint - for heavy or sensitive use, prefer NLLB.
+- The Google and Edge engines use unofficial free endpoints - for heavy, sensitive,
+  or commercial use, prefer the offline engines (and respect the XTTS CPML license).
+- Dubbing is cue-aligned, not lip-synced; translated speech that is much longer
+  than the original cue gets truncated at the next cue boundary.

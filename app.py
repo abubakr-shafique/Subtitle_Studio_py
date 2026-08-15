@@ -1,8 +1,9 @@
 """Subtitle Studio - desktop GUI (CustomTkinter).
 
 Turn a video or audio file into extracted audio, SRT/VTT subtitles, and
-optionally translated subtitles. Heavy work runs on a background thread so
-the UI stays responsive; progress and logs arrive through a queue.
+optionally translated subtitles plus translated (dubbed) audio. Heavy work
+runs on a background thread so the UI stays responsive; progress and logs
+arrive through a queue.
 """
 import os
 import queue
@@ -19,6 +20,7 @@ from core.languages import LANGUAGES, whisper_code
 from core.media import AUDIO_EXTS, SUBTITLE_EXTS, VIDEO_EXTS
 from core.pipeline import JobConfig, run_job
 from core.translator import ENGINE_LABELS
+from core.tts import TTS_ENGINE_LABELS
 
 APP_TITLE = "Subtitle Studio"
 MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
@@ -28,6 +30,8 @@ LANG_NAMES = list(LANGUAGES.keys())
 SOURCE_CHOICES = ["Auto-detect"] + LANG_NAMES
 ENGINE_NAMES = list(ENGINE_LABELS.values())
 ENGINE_KEYS = {v: k for k, v in ENGINE_LABELS.items()}
+TTS_ENGINE_NAMES = list(TTS_ENGINE_LABELS.values())
+TTS_ENGINE_KEYS = {v: k for k, v in TTS_ENGINE_LABELS.items()}
 
 
 def _patterns(exts):
@@ -47,8 +51,8 @@ class SubtitleStudioApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("980x800")
-        self.minsize(880, 720)
+        self.geometry("1000x880")
+        self.minsize(900, 800)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -109,7 +113,7 @@ class SubtitleStudioApp(ctk.CTk):
         self.device_menu.set("Auto")
 
         trans_box = ctk.CTkFrame(opts)
-        trans_box.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="nsew")
+        trans_box.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 6), sticky="nsew")
         self.chk_translate = ctk.CTkCheckBox(trans_box, text="Translate subtitles", command=self._refresh_states)
         self.chk_translate.grid(row=0, column=0, columnspan=6, padx=12, pady=(12, 4), sticky="w")
         ctk.CTkLabel(trans_box, text="Source language:").grid(row=1, column=0, padx=12, pady=(0, 12), sticky="w")
@@ -124,6 +128,22 @@ class SubtitleStudioApp(ctk.CTk):
         self.engine_menu = ctk.CTkOptionMenu(trans_box, values=ENGINE_NAMES, width=240)
         self.engine_menu.grid(row=1, column=5, padx=(8, 12), pady=(0, 12), sticky="w")
         self.engine_menu.set(ENGINE_NAMES[0])
+
+        tts_box = ctk.CTkFrame(opts)
+        tts_box.grid(row=2, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="nsew")
+        self.chk_tts = ctk.CTkCheckBox(
+            tts_box, text="Generate translated audio (TTS dub)", command=self._refresh_states
+        )
+        self.chk_tts.grid(row=0, column=0, columnspan=3, padx=12, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(tts_box, text="TTS engine:").grid(row=1, column=0, padx=12, pady=(0, 12), sticky="w")
+        self.tts_menu = ctk.CTkOptionMenu(tts_box, values=TTS_ENGINE_NAMES, width=270)
+        self.tts_menu.grid(row=1, column=1, padx=8, pady=(0, 12), sticky="w")
+        self.tts_menu.set(TTS_ENGINE_NAMES[0])
+        ctk.CTkLabel(
+            tts_box,
+            text="Requires 'Translate subtitles'. XTTS clones the original speaker (no Urdu).",
+            text_color="gray", font=("", 11),
+        ).grid(row=1, column=2, padx=12, pady=(0, 12), sticky="w")
 
         actions = ctk.CTkFrame(self)
         actions.grid(row=2, column=0, padx=14, pady=6, sticky="ew")
@@ -160,12 +180,15 @@ class SubtitleStudioApp(ctk.CTk):
         self.audio_fmt_menu.configure(state="normal" if self.chk_audio.get() else "disabled")
         subs_on = bool(self.chk_subs.get()) and not is_srt
         trans_on = bool(self.chk_translate.get())
-        asr_on = subs_on or (trans_on and not is_srt)
+        tts_on = bool(self.chk_tts.get())
+        asr_on = subs_on or ((trans_on or tts_on) and not is_srt)
         for w in (self.model_menu, self.device_menu):
             w.configure(state="normal" if asr_on else "disabled")
-        self.source_menu.configure(state="normal" if (asr_on or trans_on) else "disabled")
+        self.source_menu.configure(state="normal" if (asr_on or trans_on or tts_on) else "disabled")
+        trans_fields = trans_on or tts_on
         for w in (self.target_menu, self.engine_menu):
-            w.configure(state="normal" if trans_on else "disabled")
+            w.configure(state="normal" if trans_fields else "disabled")
+        self.tts_menu.configure(state="normal" if tts_on else "disabled")
 
     def _browse_input(self):
         path = filedialog.askopenfilename(
@@ -193,10 +216,19 @@ class SubtitleStudioApp(ctk.CTk):
         save_audio = bool(self.chk_audio.get()) and not is_srt
         transcribe = bool(self.chk_subs.get()) and not is_srt
         translate = bool(self.chk_translate.get())
-        if is_srt and not translate:
-            messagebox.showwarning(APP_TITLE, "An .srt file is loaded - enable 'Translate subtitles'.")
+        generate_audio = bool(self.chk_tts.get())
+        if generate_audio and not translate:
+            if not messagebox.askyesno(
+                APP_TITLE,
+                "'Translated audio' needs translated subtitles. Enable 'Translate subtitles' too?"
+            ):
+                return
+            translate = True
+            self.chk_translate.select()
+        if is_srt and not (translate or generate_audio):
+            messagebox.showwarning(APP_TITLE, "An .srt file is loaded - enable 'Translate subtitles' and/or 'Translated audio'.")
             return
-        if not (save_audio or transcribe or translate):
+        if not (save_audio or transcribe or translate or generate_audio):
             messagebox.showwarning(APP_TITLE, "Enable at least one task.")
             return
         out_dir = self.output_dir.get() or str(Path(in_path).parent)
@@ -211,6 +243,8 @@ class SubtitleStudioApp(ctk.CTk):
             source_language=None if src_name == "Auto-detect" else whisper_code(src_name),
             target_language=self.target_menu.get(),
             translation_engine=ENGINE_KEYS[self.engine_menu.get()],
+            generate_audio=generate_audio,
+            tts_engine=TTS_ENGINE_KEYS[self.tts_menu.get()],
             whisper_model=self.model_menu.get(),
             device=DEVICE_CHOICES[self.device_menu.get()],
         )
