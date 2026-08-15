@@ -9,6 +9,8 @@ numpy>=1.26                # sample-level audio mixing for the dubbed track
 # Needed only if you want the "NLLB-200 (offline, local model)" engine.
 # The model itself (~2.4 GB) downloads on first use.
 # torch>=2.1.0
+# torchaudio
+# torchcodec
 # transformers>=4.40.0
 # sentencepiece>=0.2.0
 
