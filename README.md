@@ -82,11 +82,7 @@ python -c "from TTS.api import TTS; print('Coqui API import OK')"
 python -m pip check
 ```
 
-All commands should use the same environment. The executable should point to the active Conda environment, for example:
-
-```text
-C:\Users\adora\Anaconda3\envs\Subtitle_Studio_py\python.exe
-```
+All commands should use the same environment. 
 
 The package is installed as `coqui-tts`, but its Python import is intentionally:
 
