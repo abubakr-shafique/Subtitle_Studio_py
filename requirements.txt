@@ -1,20 +1,34 @@
-# ---- Core dependencies (required) ----
-faster-whisper>=1.1.0      # Whisper transcription on CTranslate2 (GPU/CPU)
-customtkinter>=5.2.2       # modern Tkinter GUI
-deep-translator>=1.11.4    # Google Translate engine (online)
-imageio-ffmpeg>=0.5.1      # bundled ffmpeg binary used for audio extraction
-numpy>=1.26                # sample-level audio mixing for the dubbed track
+# Subtitle Studio requirements
+# Tested environment for XTTS v2:
+#   Python 3.12
+#   NVIDIA CUDA PyTorch wheels (CUDA 12.6 example)
+#
+# Install PyTorch FIRST with the command appropriate for your GPU/CPU:
+#   pip install torch torchvision torchaudio torchcodec --index-url https://download.pytorch.org/whl/cu126
+# Then install this file:
+#   python -m pip install -r requirements.txt
 
-# ---- Optional: offline translation engine (NLLB-200) ----
-# Needed only if you want the "NLLB-200 (offline, local model)" engine.
-# The model itself (~2.4 GB) downloads on first use.
-# torch>=2.1.0
-# torchaudio
-# torchcodec
-# transformers>=4.40.0
-# sentencepiece>=0.2.0
+# ---- Core dependencies ----
+faster-whisper>=1.1.0
+customtkinter>=5.2.2
+deep-translator>=1.11.4
+imageio-ffmpeg>=0.5.1
+numpy>=1.26
 
-# ---- Optional: translated audio (TTS dubbing) ----
-# Needed only for "Generate translated audio". Pick one or both engines.
-# edge-tts>=6.1.12         # Edge TTS: online neural voices (incl. Urdu)
-# coqui-tts>=0.24          # XTTS v2: offline voice cloning (17 languages, no Urdu)
+# ---- Offline translation: NLLB-200 ----
+# PyTorch packages are installed separately above.
+transformers>=4.57,<5
+sentencepiece>=0.2.0
+
+# ---- Translated audio: Edge TTS ----
+edge-tts>=6.1.12
+
+# ---- Translated audio: XTTS v2 / Coqui ----
+# The package is installed as coqui-tts but imported as TTS.api.
+# Recent coqui-tts releases do not install PyTorch automatically.
+coqui-tts>=0.27.4
+
+# Compatibility note:
+# Do not pin Transformers to 4.46.2 for the current coqui-tts setup.
+# The installed Coqui XTTS code imports isin_mps_friendly from
+# transformers.pytorch_utils, so use a recent Transformers 4.x release.
