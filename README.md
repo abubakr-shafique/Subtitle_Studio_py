@@ -1,186 +1,233 @@
 # Subtitle Studio
 
-A desktop app (Python + CustomTkinter) that turns a **video or audio file** into:
+A desktop app built with Python and CustomTkinter that converts video or audio into:
 
-- an extracted **audio track** (WAV or MP3),
-- **subtitles** (`.srt` + `.vtt`) with automatic language detection,
-- optionally a **translated subtitle file** (timestamps preserved),
-- and optionally a **translated audio track** (TTS dubbing aligned to the original timeline).
+- extracted audio (`.wav` or `.mp3`),
+- subtitles (`.srt` and `.vtt`) with automatic language detection,
+- optionally translated subtitles,
+- optionally translated/dubbed audio aligned to the original timeline.
 
-You can also load an existing `.srt` and translate / dub it directly.
+It also accepts an existing `.srt` file for translation and Edge-TTS dubbing.
 
 ## Features
 
-- Accepts common video formats (MP4, MKV, AVI, MOV, WebM, FLV, WMV, M4V, ...) and audio formats (MP3, WAV, M4A, FLAC, OGG, AAC, WMA, OPUS, ...)
-- Audio-only extraction at original quality (WAV) or MP3
-- Transcription with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2): fast on GPU, automatic language detection, VAD filtering, live progress bar
-- Subtitle translation with two engines:
-  - **Google Translate (online)** - zero extra downloads, needs internet
-  - **NLLB-200 distilled 600M (offline)** - runs locally on your GPU/CPU, private
-- **Translated audio (TTS dubbing)** with two engines:
-  - **Edge TTS (online)** - neural voices for every built-in language, including Urdu and Hindi
-  - **XTTS v2 (offline)** - clones the original speaker's voice from a 30 s reference (17 languages, no Urdu)
-- 24 built-in languages, including English, Turkish, Spanish, Hindi, Urdu, French, Chinese (Simplified/Traditional), Japanese, Korean, Arabic, German, Russian, and more
-- Resilient by design: a failed translation batch is retried once, then skipped (original text kept) while the rest of the file continues; a failed TTS cue is left silent. Nothing aborts mid-file.
-- Background worker thread: the GUI never freezes, and long jobs can be cancelled
-- No separate ffmpeg install needed (uses the `imageio-ffmpeg` bundled binary)
-
-## Pipeline
-
-```
-video/audio file
-      |
-      |--(extract audio only)----------------> name_audio.wav / .mp3
-      |
-      +--> ffmpeg 16 kHz WAV -> faster-whisper -> name.<lang>.srt + .vtt
-                                                              |
-                                            (optional) translate -> name.<target>.srt
-                                                              |
-                                            (optional) TTS dub  -> name.<target>.dub.wav
-```
+- Video: MP4, MKV, AVI, MOV, WebM, FLV, WMV, M4V, MPEG, MPG, 3GP.
+- Audio: MP3, WAV, M4A, FLAC, OGG, AAC, WMA, OPUS, AIFF.
+- Automatic transcription and language detection with faster-whisper.
+- SRT and VTT generation.
+- Translation using Google Translate or local NLLB-200.
+- Translated audio using Edge TTS or local Coqui XTTS v2.
+- Batch-level translation failsafe: failed batches are retried once, then skipped while the original text is preserved.
+- TTS failsafe: a failed subtitle cue is left silent while the remaining cues continue.
+- Background processing, progress reporting, logging, and cancellation.
 
 ## Installation
 
-Requires **Python 3.10+** (3.10-3.12 recommended).
+Python 3.10+ is required. For the tested XTTS setup, use Python 3.12.
 
-```bash
-git clone <your-repo> Subtitle_Studio_py   # or just unzip the project
-cd Subtitle_Studio_py
-conda create --name Subtitle_Studio_py python=3.10
-conda activate Subtitle_Studio_py      # Windows
-pip install -r requirements.txt
+### Conda environment
+
+Windows Anaconda Prompt:
+
+```bat
+conda create --name Subtitle_Studio_py python=3.12
+conda activate Subtitle_Studio_py
 ```
 
-### Optional extras
+### Install PyTorch first
 
-Uncomment the relevant lines at the bottom of `requirements.txt`, then re-run
-`pip install -r requirements.txt`:
+For an NVIDIA GPU, install the PyTorch build matching your CUDA setup. The following is a CUDA 12.6 example:
 
-- **NLLB-200** (offline translation): torch + transformers + sentencepiece. ~2.4 GB model download on first use.
-- **Edge TTS** (online translated audio): `edge-tts`. Small, pure Python.
-- **XTTS v2** (offline translated audio with voice cloning): `coqui-tts`. ~1.8 GB model download on first use. Note the model is under the **CPML non-commercial license**.
+```bat
+python -m pip install torch torchvision torchaudio torchcodec --index-url https://download.pytorch.org/whl/cu126
+```
 
-### GPU notes (CUDA)
+For CPU-only installation:
 
-- With an NVIDIA GPU, faster-whisper runs on CUDA automatically (`Device: Auto`).
-  On Linux you may need the CUDA runtime libraries:
-  `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`
-  (see the faster-whisper docs for details). On Windows, install the CUDA 12.x toolkit.
-- No GPU? Everything still works on CPU (Whisper falls back to `int8`); pick a
-  smaller model such as `small` or `base` for usable speed.
+```bat
+python -m pip install torch torchvision torchaudio torchcodec
+```
 
-## Usage
+### Install the application dependencies
 
-```bash
+```bat
+python -m pip install -r requirements.txt
+```
+
+Always use `python -m pip` rather than plain `pip`; this ensures packages are installed into the same interpreter that launches the app.
+
+## Verified Coqui / Transformers setup
+
+The current Coqui XTTS code imports:
+
+```python
+from transformers.pytorch_utils import isin_mps_friendly
+```
+
+Therefore, do **not** use the older `transformers==4.46.2` pin with this setup. Use a recent Transformers 4.x release:
+
+```bat
+python -m pip install -U "transformers>=4.57,<5"
+python -m pip install -U "coqui-tts>=0.27.4"
+```
+
+Verify the environment before launching the GUI:
+
+```bat
+python -c "import sys; print(sys.executable)"
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.cuda.is_available())"
+python -c "import transformers; print('Transformers:', transformers.__version__)"
+python -c "from transformers.pytorch_utils import isin_mps_friendly; print('Transformers API OK')"
+python -c "from TTS.api import TTS; print('Coqui API import OK')"
+python -m pip check
+```
+
+All commands should use the same environment. The executable should point to the active Conda environment, for example:
+
+```text
+C:\Users\adora\Anaconda3\envs\Subtitle_Studio_py\python.exe
+```
+
+The package is installed as `coqui-tts`, but its Python import is intentionally:
+
+```python
+from TTS.api import TTS
+```
+
+Do not install the obsolete package with `pip install TTS`.
+
+## Launch
+
+```bat
 python app.py
 ```
 
-1. **Browse...** - pick a video, audio, or `.srt` file. The output folder defaults to the input's folder.
-2. Tick any combination of tasks:
-   - **Extract audio only** - choose `wav` (lossless) or `mp3`.
-   - **Generate subtitles** - pick the Whisper model and device.
-   - **Translate subtitles** - pick source (`Auto-detect` uses Whisper's detected language), target language, and engine.
-   - **Generate translated audio** - pick the TTS engine (requires translation to be on; the app offers to enable it for you).
-3. Press **Start**. Watch the progress bar and log; **Cancel** stops between segments/batches.
-4. **Open output folder** jumps straight to the results.
+1. Choose a video, audio, or `.srt` input.
+2. Choose one or more tasks.
+3. Enable **Translate subtitles** if translation is needed.
+4. Enable **Generate translated audio** for dubbing.
+5. Choose the translation and TTS engines.
+6. Click **Start**.
 
-### Output files (for input `lecture.mp4`, target Turkish)
+The GUI's TTS option automatically requires translated subtitles. XTTS voice cloning requires the original video/audio because it uses a short source-speaker reference. For an `.srt` input or Urdu target, use Edge TTS.
 
-| File | Content |
-|---|---|
-| `lecture_audio.wav` / `.mp3` | extracted audio track |
-| `lecture.en.srt`, `lecture.en.vtt` | subtitles in the detected language |
-| `lecture.tr.srt` | translated subtitles (timestamps preserved) |
-| `lecture.tr.dub.wav` | translated speech, aligned to the original timeline (24 kHz WAV) |
+## Output examples
 
-## How the dubbing syncs
+For `lecture.mp4` translated to Turkish:
 
-Each translated cue is synthesized and placed at its **original start time** on a
-silent canvas the length of the source media. If a synthesized clip is longer
-than the gap before the next cue, it is faded out (40 ms) and truncated so cues
-never talk over each other; short clips leave natural silence. The result is a
-WAV you can mux back over the video, e.g.:
+```text
+lecture_audio.wav
+lecture.en.srt
+lecture.en.vtt
+lecture.tr.srt
+lecture.tr.dub.wav
+```
 
-```bash
+The dubbed WAV is aligned to the original subtitle timestamps. If a translated cue is longer than the available gap, it is faded and truncated at the next cue to prevent overlapping speech.
+
+To mux the translated audio back into the original video:
+
+```bat
 ffmpeg -i lecture.mp4 -i lecture.tr.dub.wav -map 0:v -map 1:a -c:v copy -shortest lecture_tr.mp4
 ```
 
-## Choosing a Whisper model
+## Translation failsafe
 
-Approximate VRAM with `float16` on GPU (CPU uses `int8` and roughly half the RAM):
+Translation is processed in batches of 32 cues:
 
-| Model | ~VRAM | Relative speed | Notes |
-|---|---|---|---|
-| `tiny` | ~1 GB | ~10x realtime | drafts only |
-| `base` | ~1 GB | ~7x | quick checks |
-| `small` | ~2 GB | ~4x | decent quality |
-| `medium` | ~5 GB | ~2x | good quality |
-| `large-v3` | ~6-8 GB | ~1x | best accuracy - recommended on your 16 GB GPU |
+1. Try the batch.
+2. If it fails, wait briefly and retry once.
+3. If it fails again, preserve the original text for that batch.
+4. Continue with the remaining batches.
 
-Models download from Hugging Face on first use (`large-v3` is ~3 GB).
+The log reports failed batches and the number of cues that remained in the source language.
 
-## Translation engines
+## TTS engines
 
-| Engine | Internet | Extra install | Notes |
-|---|---|---|---|
-| Google Translate | required | none | fast, free endpoint; unofficial API, very long jobs may be rate-limited |
-| NLLB-200 (offline) | no | torch + transformers + sentencepiece | private, runs on your GPU; ~2.4 GB model download once |
+| Engine | Internet | Voice | Notes |
+|---|---:|---|---|
+| Edge TTS | Required | Microsoft neural voice | Supports all built-in languages, including Urdu. |
+| XTTS v2 | No after model download | Cloned source voice | Supports 17 languages; Urdu is not supported. Requires the original media. |
 
-**Failsafe:** translation runs in batches of 32 cues. A failed batch is retried
-once after a short pause; if it still fails, those cues keep their original text
-and the job continues. The log reports how many cues (if any) were left
-untranslated, so you can re-run just to patch them.
+XTTS v2 is under the Coqui Public Model License (CPML), which restricts use to permitted non-commercial purposes. Review the model license before redistribution or commercial use.
 
-## TTS engines (translated audio)
+## Hardware
 
-| Engine | Internet | Extra install | Languages | Notes |
-|---|---|---|---|---|
-| Edge TTS | required | `edge-tts` | all 24 built-in (incl. Urdu, Hindi) | neural voices, one default voice per language - edit `EDGE_VOICES` in `core/tts.py` to change |
-| XTTS v2 | no | `coqui-tts` | 17 (no Urdu) | clones the original speaker from a 30 s reference auto-cut from your file; CPML non-commercial license |
+The target configuration is 32 GB RAM and 16 GB VRAM:
 
-**Failsafe:** a cue that fails to synthesize is left silent and dubbing
-continues; the log reports how many cues were spoken vs skipped.
+- `large-v3` Whisper: approximately 6–8 GB VRAM.
+- NLLB-200: approximately 1.5–2 GB VRAM in half precision.
+- XTTS v2: typically a few GB of VRAM depending on PyTorch/model configuration.
 
-## Hardware fit (32 GB RAM / 16 GB VRAM)
-
-`large-v3` in `float16` (~6-8 GB VRAM), NLLB-200 in `float16` (~1.5 GB), and
-XTTS v2 (~2 GB) each fit comfortably - even two at a time - in 16 GB VRAM, and
-32 GB system RAM is plenty for long videos. If you ever hit OOM, switch the
-Whisper model to `medium` or use CPU + `small`.
+If memory is insufficient, select Whisper `medium` or `small`, or choose CPU mode.
 
 ## Troubleshooting
 
-- **"ffmpeg was not found"** - `pip install imageio-ffmpeg` (or install system ffmpeg).
-- **Whisper fails to load on CUDA** - install the CUDA 12 runtime libs (see GPU notes), or set Device to `CPU`.
-- **NLLB engine errors on start** - the optional deps are not installed; see Optional extras.
-- **Google engine leaves cues untranslated** - you were offline or rate-limited; the failsafe kept the original text. Wait a minute and re-run, or switch to NLLB.
-- **"XTTS v2 does not support ..."** - that target (e.g. Urdu) has no XTTS voice; use Edge TTS for it.
-- **"XTTS voice cloning needs the original media"** - you loaded an `.srt`; voice cloning needs the source audio/video. Use Edge TTS for `.srt` input.
-- **First run is slow** - model weights are downloading; subsequent runs start instantly.
+### Coqui API import error
+
+Run:
+
+```bat
+python -c "from TTS.api import TTS; print('Coqui API import OK')"
+```
+
+If it fails with `isin_mps_friendly`, update Transformers:
+
+```bat
+python -m pip install -U "transformers>=4.57,<5"
+```
+
+If it fails because of PyTorch or audio backends:
+
+```bat
+python -m pip install -U torch torchaudio torchcodec
+```
+
+Then verify:
+
+```bat
+python -m pip check
+python -c "from TTS.api import TTS; print('Coqui API import OK')"
+```
+
+If the package is installed but the GUI cannot import it, print the interpreter used by the GUI and compare it with the installation environment:
+
+```bat
+python -c "import sys; print(sys.executable)"
+python -m pip --version
+```
+
+Also make sure the project does not contain files/folders named `TTS.py`, `TTS`, `transformers.py`, or `transformers`, because these can shadow installed packages.
+
+### CUDA errors
+
+Set the GUI device to **CPU** to test the software path. If CPU works but CUDA fails, reinstall the PyTorch wheel matching the installed NVIDIA driver/CUDA runtime.
+
+### First-run downloads
+
+Whisper, NLLB, and XTTS download model weights on first use. Keep the internet connection active during the first initialization of each model.
 
 ## Project structure
 
-```
+```text
 subtitle_studio/
-|-- app.py                 # CustomTkinter GUI (run this)
+|-- app.py
 |-- core/
-|   |-- languages.py       # one registry: Whisper / Google / NLLB codes
-|   |-- media.py           # ffmpeg audio extraction, duration probe, WAV normalize
-|   |-- subtitles.py       # SRT/VTT parse + write (dependency-free)
-|   |-- transcriber.py     # faster-whisper wrapper (progress + cancel)
-|   |-- translator.py      # Google + NLLB engines, batch failsafe, SRT driver
-|   |-- tts.py             # Edge TTS + XTTS engines, timeline dubbing mixer
-|   `-- pipeline.py        # job orchestration (extract -> transcribe -> translate -> dub)
+|   |-- languages.py
+|   |-- media.py
+|   |-- subtitles.py
+|   |-- transcriber.py
+|   |-- translator.py
+|   |-- tts.py
+|   `-- pipeline.py
 |-- requirements.txt
 `-- README.md
 ```
 
-## Notes and limitations
+## Limitations
 
-- Whisper's built-in `translate` task only translates *into English*, so this app
-  uses dedicated translators to support many source/target pairs.
-- Translation is cue-by-cue; very long cues are sent as-is (NLLB truncates at 512 tokens).
-- The Google and Edge engines use unofficial free endpoints - for heavy, sensitive,
-  or commercial use, prefer the offline engines (and respect the XTTS CPML license).
-- Dubbing is cue-aligned, not lip-synced; translated speech that is much longer
-  than the original cue gets truncated at the next cue boundary.
+- Translation is cue-by-cue.
+- NLLB may truncate very long cues at its configured maximum length.
+- Google Translate and Edge TTS require internet access and may be rate-limited.
+- Dubbing is timestamp-aligned but not lip-synced.
+- XTTS voice cloning is subject to the model license and should only be used with appropriate authorization for the reference voice.
