@@ -1,0 +1,12 @@
+# ---- Core dependencies (required) ----
+faster-whisper>=1.1.0      # Whisper transcription on CTranslate2 (GPU/CPU)
+customtkinter>=5.2.2       # modern Tkinter GUI
+deep-translator>=1.11.4    # Google Translate engine (online)
+imageio-ffmpeg>=0.5.1      # bundled ffmpeg binary used for audio extraction
+
+# ---- Optional: offline translation engine (NLLB-200) ----
+# Needed only if you want the "NLLB-200 (offline, local model)" engine.
+# The model itself (~2.4 GB) downloads on first use.
+# torch>=2.1.0
+# transformers>=4.40.0
+# sentencepiece>=0.2.0
